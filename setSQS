@@ -1,0 +1,297 @@
+<?php
+
+App::import('Vendor', 'siteException', array('file' => 'exception.site.php'));
+App::import('Vendor', 'Amazon', array('file' => 'Amazon/aws-sdk/sdk.class.php'));
+
+class SetSqsController extends AppController {
+
+	/*
+	*	RECEIVES SITE_ID, QUERIES USERNAMES AND SENDS TO SQS
+	*/
+
+	var $name = 'SetSqs';
+	var $uses = array('ChannelCron','Log');
+	var $components = array('Amazonsdk.Amazon');
+	var $site_id;
+	var $usernames;
+	var $username;
+	var $channel_type_id;
+	var $queuename;
+	var $sqsurlprefix;
+	var $sqsurl;
+	var $sqsresponse;
+	var $locaXmlRes;
+	var $localEtagRes;
+	var $localEtagExists;
+	var $etag;
+	var $last_modified;
+	var $remoteEtagRes;
+	var $remoteXmlIsChanged;
+	var $remoteDownloadRes;
+	var $queue_array = array();
+	var $dump_me;
+
+	function setSiteId($siteid) {
+		$this->site_id = (int)$siteid;
+	}
+
+	function init() {
+		$this->usernames = null;
+
+		$this->configBucket = 'c9360';
+		$this->configKeyname = 'c9360Config.xml';
+		$this->configLocalFilepath = 'downloads/' . $this->configKeyname;
+		$this->configResponse = null;
+		$this->username = null;
+		$this->channel_type_id = null;
+		$this->queuename = null;
+		$this->sqsurlprefix = 'https://sqs.us-west-1.amazonaws.com/741321053962/';
+		$this->sqsurl = null;
+		$this->sqsresponse = null;
+		$this->locaXmlRes = null;
+		$this->localEtagRes = null;
+		$this->localEtagExists = 1;
+		$this->etag = null;
+		$this->last_modified = null;
+		$this->remoteEtagRes = null;
+		$this->remoteXmlIsChanged = 0;
+		$this->remoteDownloadRes = null;
+		$this->queue_array = null;
+		$this->dump_me = 0;
+	}
+
+	function run() {
+		$this->evalSiteId();
+		$this->setTimeLimit();
+		$this->readUsernames();
+		$this->evalUsernames();
+
+		$this->readLocalEtag();
+		$this->evalLocalEtag();
+
+		if ($this->localEtagExists == 1) {
+			$this->assignEtagVars();
+			$this->checkRemoteXmlForChanges();
+			$this->evalRemoteXmlForChanges();
+		}
+
+		if (($this->remoteXmlIsChanged == 1) or ($this->localEtagExists == 0)) {
+			$this->downloadRemoteXml();
+			$this->evalDownloadRemoteXml();
+			$this->updateEtags();
+		}
+
+		$this->readLocalXml();
+		$this->evalLocalXml();
+		$this->extractLocalXml();
+
+		$this->loopUsernames();
+	}
+
+	function destruct() {
+		unset($this->configBucket);
+		unset($this->configKeyname);
+		unset($this->configLocalFilepath);
+		unset($this->configResponse);
+		unset($this->username);
+		unset($this->channel_type_id);
+		unset($this->queuename);
+		unset($this->sqsurlprefix);
+		unset($this->sqsurl);
+		unset($this->sqsresponse);
+		unset($this->locaXmlRes);
+		unset($this->localEtagRes);
+		unset($this->localEtagExists);
+		unset($this->etag);
+		unset($this->last_modified);
+		unset($this->remoteEtagRes);
+		unset($this->remoteXmlIsChanged);
+		unset($this->remoteDownloadRes);
+		unset($this->queue_array);
+		unset($this->dump_me);
+	}
+
+	function evalSiteId() {
+		if (!isset($this->site_id)) { throw new siteException('Site id must be set'); }
+	}
+
+	function setTimeLimit() {
+		set_time_limit(0);
+	}
+
+	function readUsernames() {
+		/*
+			array(1) { [0]=> array(2) {
+				["channels"]=> array(2) {
+					["username"]=> string(10) "Sadaffoods" ["channel_type_id"]=> string(1) "1" }
+				["wces"]=> array(1) {
+					["sqsqueuename"]=> string(23) "Queue-Facebook-Test-Jim" } } }
+		*/
+		$this->usernames = $this->ChannelCron->getUsernames($this->site_id);
+	}
+
+	function evalUsernames() {
+		if (($this->usernames === false) or (!$this->usernames)) { throw new siteException('No usernames to send to SQS'); }
+	}
+
+	function readLocalEtag() {
+		$this->localEtagRes = @fopen('downloads/etag.txt', 'r');
+	}
+
+	function evalLocalEtag() {
+		if ($this->localEtagRes == false) {
+			$this->localEtagExists = 0;
+		}
+	}
+
+	function assignEtagVars() {
+		$row = strtolower(fgets($this->localEtagRes));
+		$exploded = explode(';', $row);
+		$i = 0;
+		foreach ($exploded as $e) {
+			if ($i == 0) { $this->etag = $e; }
+			if ($i == 1) { $this->last_modified = $e; }
+			$i++;
+		}
+	}
+
+	function checkRemoteXmlForChanges() {
+		$this->remoteEtagRes = $this->Amazon->S3->get_object($this->configBucket, $this->configKeyname, array(
+			'lastmodified' => $this->last_modified,
+			'etag' => $this->etag
+		));
+	}
+
+	function evalRemoteXmlForChanges() {
+		if ($this->remoteEtagRes->status == 200) {
+			//echo 'The server replied with 200, the file HAS changed';
+			//echo 'The server replied with 304, the file has NOT changed';
+			$this->remoteXmlIsChanged == 1;
+		}
+	}
+
+	function downloadRemoteXml() {
+		$this->remoteDownloadRes = $this->Amazon->S3->get_object($this->configBucket, $this->configKeyname, array('fileDownload' => $this->configLocalFilepath));
+		$this->remoteDownloadRes = $this->Amazon->S3->get_object($this->configBucket, $this->configKeyname);
+	}
+
+	function evalDownloadRemoteXml() {
+		if ($this->remoteDownloadRes->status == 404) {
+			$this->writeLog('FATAL ERROR: Cannot access Amazon S3 global config file');
+			throw new siteException('cannot access Amazon S3 global config file');
+		}
+	}
+
+	function updateEtags() {
+		$etag = $this->remoteDownloadRes->header['etag'];
+		$last_modified = $this->remoteDownloadRes->header['last-modified'];
+		$save_string = 'etag: ' . $etag . '; lastmod: ' . $last_modified;
+		$handle = fopen('downloads/etag.txt', 'w');
+		fwrite($handle, $save_string);
+		fclose($handle);
+	}
+
+	function readLocalXml() {
+		$this->locaXmlRes = @simplexml_load_file($this->configLocalFilepath);
+	}
+
+	function evalLocalXml() {
+		if (($this->locaXmlRes === false) or (!$this->locaXmlRes)) { throw new siteException('No local config file'); }
+	}
+
+	function extractLocalXml() {
+		$xml = simplexml_load_file('downloads/c9360Config.xml');
+		$WceChannelTypes = $xml->WceChannelTypes;
+		foreach ($WceChannelTypes as $types) {
+			foreach ($types as $t) {
+				$channel_type_id = (int)$t[0]['channelTypeId'];
+				foreach ($t as $key => $value) {
+					if ($key == 'SqsQueue') {
+						$this->queue_array[$channel_type_id]  = (string)$value;
+					}
+				}
+			}
+		}
+	}
+
+	function loopUsernames() {
+		foreach ($this->usernames as $u) {
+			$this->assignUsername($u);
+			$this->assignChannelTypeId($u);
+			$this->assignQueuename($u);
+			$this->inspectMsg();
+			$this->evalQueueName();
+			$this->constructSqsUrl();
+			$this->sendSQSMessage();
+			$this->evalSQSResponse();
+			$this->writeLog('SQS PUSH: username ' . $this->username . ', type ' . $this->channel_type_id);
+			$this->clearVars();
+		}
+	}
+
+	function assignUsername($u) {
+		$this->username = $u['channels']['username'] . ';90days';
+	}
+
+	function assignChannelTypeId($u) {
+		$this->channel_type_id = $u['channels']['channel_type_id'];
+	}
+
+	function assignQueuename($u) {
+		//$this->queuename = $u['wces']['sqsqueuename'];
+		if ($this->channel_type_id) {
+			$this->queuename = $this->queue_array[$this->channel_type_id];
+		} else {
+			$this->writeLog('FATAL ERROR: Channel type ids are required by SQSSiteNew');
+			throw new siteException('channel ids are required');
+		}
+	}
+
+	function inspectMsg() {
+		if ($this->dump_me == 1) {
+			var_dump($this->username);
+			echo '<br />------<br />';
+			var_dump($this->channel_type_id);
+			echo '<br />------<br />';
+			var_dump($this->queuename);
+			echo '<br />------<br />';
+		}
+	}
+
+	function evalQueueName() {
+		if (($this->usernames === false) or (!$this->usernames)) {
+			$this->writeLog('FATAL ERROR: Missing queue name for site ' . $this->site_id . ', channel_type ' . $this->channel_type_id . ', username ' . $this->username);
+			continue;
+		}
+	}
+
+	function constructSqsUrl() {
+		$this->sqsurl = $this->sqsurlprefix . $this->queuename;
+	}
+
+	function sendSQSMessage() {
+		$this->sqsresponse = $this->Amazon->SQS->sendMessage($this->sqsurl, $this->username);
+	}
+
+	function evalSQSResponse() {
+		if ($this->sqsresponse->status != 200) {
+			$this->writeLog('FATAL ERROR: Cannot push username to SQS for type ' . $this->channel_type_id);
+			//throw new siteException('cannot push usernames to SQS for site');
+		}
+	}
+
+	function clearVars() {
+		$this->username = null;
+		$this->queuename = null;
+		$this->sqsurl = null;
+		$this->sqsresponse = null;
+	}
+
+	function writeLog($msg) {
+		$this->Log->create();
+		$this->Log->set(array('site_id' => $this->site_id, 'jobid' => 0, 'method' => 'parser', 'message' => $msg));
+		$this->Log->save();
+	}
+
+}
+?>
