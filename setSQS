@@ -1,6 +1,5 @@
 <?php
 
-App::import('Vendor', 'siteException', array('file' => 'exception.site.php'));
 App::import('Vendor', 'Amazon', array('file' => 'Amazon/aws-sdk/sdk.class.php'));
 
 class SetSqsController extends AppController {
@@ -294,4 +293,5 @@ class SetSqsController extends AppController {
 	}
 
 }
+class siteException extends Exception{}
 ?>
